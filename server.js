@@ -1,3 +1,4 @@
+const serverless = require('serverless-http');
 const express = require('express');
 const session = require('express-session');
 const sqlite3 = require('sqlite3').verbose();
@@ -229,3 +230,5 @@ app.get('/api/export', async (req, res) => {
 });
 
 app.listen(3000, () => console.log('Server running di http://localhost:3000'));
+module.exports = app;
+module.exports.handler = serverless(app);
