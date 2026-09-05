@@ -1,6 +1,6 @@
 const express = require('express');
 const session = require('express-session');
-const bcrypt = require('bcryptjs'); // PENTING: Gunakan bcryptjs untuk menghindari native binding crash
+const bcrypt = require('bcryptjs');
 const ExcelJS = require('exceljs');
 const path = require('path');
 const db = require('./db');
@@ -16,7 +16,7 @@ app.use(session({
     resave: false,
     saveUninitialized: false,
     cookie: {
-        secure: false, // Set true jika menggunakan HTTPS penuh
+        secure: false,
         maxAge: 24 * 60 * 60 * 1000
     }
 }));
@@ -27,9 +27,10 @@ const TARGET_LNG = 110.3803174;
 const MAX_RADIUS = 10;
 const DEV_MODE = true;
 
-// Inisialisasi Tabel & Seed Data Satu per Satu (Menghindari Status 400 Turso)
+// Inisialisasi Tabel & Seed Data secara Terpisah (Aman untuk Turso DB)
 async function initDb() {
     try {
+        // 1. Buat Tabel Users
         await db.execute(`
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,6 +41,7 @@ async function initDb() {
             )
         `);
 
+        // 2. Buat Tabel Absensi
         await db.execute(`
             CREATE TABLE IF NOT EXISTS absensi (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,6 +56,7 @@ async function initDb() {
             )
         `);
 
+        // 3. Seed Default Users
         const defaultUsers = [
             { username: 'hilmizaidan', pass: '23.83.0971', nama: 'Hilmi Zaidan', role: 'siswa' },
             { username: 'andikahendra', pass: '23.83.0976', nama: 'Andika Hendra', role: 'siswa' },
@@ -75,7 +78,7 @@ async function initDb() {
             }
         }
     } catch (err) {
-        console.error("Gagal Inisialisasi Turso DB:", err);
+        console.error("Gagal Inisialisasi Turso DB:", err.message);
     }
 }
 
@@ -105,11 +108,11 @@ app.post('/api/login', async (req, res) => {
             args: [username]
         });
 
-        const user = result.rows[0];
-        if (!user) {
+        if (!result.rows || result.rows.length === 0) {
             return res.status(400).json({ success: false, message: 'User tidak ditemukan' });
         }
 
+        const user = result.rows[0];
         if (bcrypt.compareSync(password, user.password)) {
             req.session.user = { id: user.id, username: user.username, nama: user.nama, role: user.role };
             return res.json({ success: true, user: req.session.user });
@@ -117,7 +120,8 @@ app.post('/api/login', async (req, res) => {
             return res.status(400).json({ success: false, message: 'Password salah' });
         }
     } catch (err) {
-        return res.status(500).json({ success: false, message: 'Database error' });
+        console.error("Login Error:", err.message);
+        return res.status(500).json({ success: false, message: 'Database error: ' + err.message });
     }
 });
 
@@ -186,8 +190,11 @@ app.post('/api/absen', async (req, res) => {
                 args: [req.session.user.id, dateStr]
             });
 
+            if (!check.rows || check.rows.length === 0) {
+                return res.status(400).json({ message: 'Anda belum absen masuk hari ini' });
+            }
+
             const row = check.rows[0];
-            if (!row) return res.status(400).json({ message: 'Anda belum absen masuk hari ini' });
             if (row.jam_pulang) return res.status(400).json({ message: 'Anda sudah absen pulang hari ini' });
 
             await db.execute({
@@ -198,7 +205,8 @@ app.post('/api/absen', async (req, res) => {
             return res.json({ success: true, message: `Absen pulang berhasil (${status})` });
         }
     } catch (err) {
-        return res.status(500).json({ message: 'Gagal mencatat absensi' });
+        console.error("Absen Error:", err.message);
+        return res.status(500).json({ message: 'Gagal mencatat absensi: ' + err.message });
     }
 });
 
@@ -215,7 +223,7 @@ app.get('/api/dosen/monitoring', async (req, res) => {
             ORDER BY a.tanggal DESC, a.jam_masuk DESC
         `);
 
-        const rows = result.rows;
+        const rows = result.rows || [];
         const stats = {
             totalAbsen: rows.length,
             terlambat: rows.filter(r => r.status_masuk === 'Terlambat').length,
@@ -224,7 +232,8 @@ app.get('/api/dosen/monitoring', async (req, res) => {
 
         return res.json({ stats, data: rows });
     } catch (err) {
-        return res.status(500).json({ message: 'Database error' });
+        console.error("Monitoring Error:", err.message);
+        return res.status(500).json({ message: 'Database error: ' + err.message });
     }
 });
 
@@ -260,14 +269,15 @@ app.get('/api/export', async (req, res) => {
             { header: 'Status Pulang', key: 'status_pulang', width: 15 }
         ];
 
-        result.rows.forEach(r => sheet.addRow(r));
+        (result.rows || []).forEach(r => sheet.addRow(r));
 
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         res.setHeader('Content-Disposition', `attachment; filename=Laporan_Absensi_${range}.xlsx`);
         await workbook.xlsx.write(res);
         return res.end();
     } catch (err) {
-        return res.status(500).send('Error database');
+        console.error("Export Error:", err.message);
+        return res.status(500).send('Database error: ' + err.message);
     }
 });
 
