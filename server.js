@@ -27,23 +27,14 @@ const TARGET_LNG = 110.3803174;
 const MAX_RADIUS = 10;
 const DEV_MODE = true;
 
-function getDistance(lat1, lon1, lat2, lon2) {
-    const R = 6371e3;
-    const φ1 = lat1 * Math.PI / 180;
-    const φ2 = lat2 * Math.PI / 180;
-    const Δφ = (lat2 - lat1) * Math.PI / 180;
-    const Δλ = (lon2 - lon1) * Math.PI / 180;
+// Flag untuk memastikan inisialisasi hanya berjalan sekali per instance
+let isDbInitialized = false;
 
-    const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
-              Math.cos(φ1) * Math.cos(φ2) *
-              Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c;
-}
+async function ensureDbInitialized() {
+    if (isDbInitialized) return;
 
-// ENDPOINT KHUSUS INIT DB (Akses manual di browser sekali saja: /api/init)
-app.get('/api/init', async (req, res) => {
     try {
+        // 1. Buat Tabel Users
         await db.execute(`
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,6 +45,7 @@ app.get('/api/init', async (req, res) => {
             )
         `);
 
+        // 2. Buat Tabel Absensi
         await db.execute(`
             CREATE TABLE IF NOT EXISTS absensi (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,6 +60,7 @@ app.get('/api/init', async (req, res) => {
             )
         `);
 
+        // 3. Seed Default Users satu per satu (mencegah error batch Turso)
         const defaultUsers = [
             { username: 'hilmizaidan', pass: '23.83.0971', nama: 'Hilmi Zaidan', role: 'siswa' },
             { username: 'andikahendra', pass: '23.83.0976', nama: 'Andika Hendra', role: 'siswa' },
@@ -89,17 +82,34 @@ app.get('/api/init', async (req, res) => {
             }
         }
 
-        return res.json({ success: true, message: 'Database initialized successfully!' });
+        isDbInitialized = true;
     } catch (err) {
-        console.error("Init DB Error:", err);
-        return res.status(500).json({ success: false, error: err.message });
+        console.error("Gagal Inisialisasi DB Lazy:", err.message);
+        throw err; // Lempar error agar bisa ditangkap oleh handler login
     }
-});
+}
+
+function getDistance(lat1, lon1, lat2, lon2) {
+    const R = 6371e3;
+    const φ1 = lat1 * Math.PI / 180;
+    const φ2 = lat2 * Math.PI / 180;
+    const Δφ = (lat2 - lat1) * Math.PI / 180;
+    const Δλ = (lon2 - lon1) * Math.PI / 180;
+
+    const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+              Math.cos(φ1) * Math.cos(φ2) *
+              Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
+}
 
 // ROUTE API LOGIN
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
     try {
+        // Otomatis pastikan DB & Tabel siap sebelum menjalankan login
+        await ensureDbInitialized();
+
         const result = await db.execute({
             sql: 'SELECT * FROM users WHERE username = ?',
             args: [username]
@@ -117,7 +127,7 @@ app.post('/api/login', async (req, res) => {
             return res.status(400).json({ success: false, message: 'Password salah' });
         }
     } catch (err) {
-        console.error("Login Error:", err);
+        console.error("Login Error:", err.message);
         return res.status(500).json({ success: false, message: 'Database error: ' + err.message });
     }
 });
@@ -202,7 +212,7 @@ app.post('/api/absen', async (req, res) => {
             return res.json({ success: true, message: `Absen pulang berhasil (${status})` });
         }
     } catch (err) {
-        console.error("Absen Error:", err);
+        console.error("Absen Error:", err.message);
         return res.status(500).json({ message: 'Gagal mencatat absensi: ' + err.message });
     }
 });
@@ -229,7 +239,7 @@ app.get('/api/dosen/monitoring', async (req, res) => {
 
         return res.json({ stats, data: rows });
     } catch (err) {
-        console.error("Monitoring Error:", err);
+        console.error("Monitoring Error:", err.message);
         return res.status(500).json({ message: 'Database error: ' + err.message });
     }
 });
@@ -273,7 +283,7 @@ app.get('/api/export', async (req, res) => {
         await workbook.xlsx.write(res);
         return res.end();
     } catch (err) {
-        console.error("Export Error:", err);
+        console.error("Export Error:", err.message);
         return res.status(500).send('Database error: ' + err.message);
     }
 });
