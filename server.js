@@ -27,64 +27,6 @@ const TARGET_LNG = 110.3803174;
 const MAX_RADIUS = 10;
 const DEV_MODE = true;
 
-// Inisialisasi Tabel & Seed Data secara Terpisah (Aman untuk Turso DB)
-async function initDb() {
-    try {
-        // 1. Buat Tabel Users
-        await db.execute(`
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE,
-                password TEXT,
-                nama TEXT,
-                role TEXT DEFAULT 'siswa'
-            )
-        `);
-
-        // 2. Buat Tabel Absensi
-        await db.execute(`
-            CREATE TABLE IF NOT EXISTS absensi (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                tanggal TEXT,
-                jam_masuk TEXT,
-                jam_pulang TEXT,
-                status_masuk TEXT,
-                status_pulang TEXT,
-                foto_masuk TEXT,
-                foto_pulang TEXT
-            )
-        `);
-
-        // 3. Seed Default Users
-        const defaultUsers = [
-            { username: 'hilmizaidan', pass: '23.83.0971', nama: 'Hilmi Zaidan', role: 'siswa' },
-            { username: 'andikahendra', pass: '23.83.0976', nama: 'Andika Hendra', role: 'siswa' },
-            { username: 'wahidashori', pass: 'wahid2026', nama: 'Wahid Ashori, M.Kom (Dosen)', role: 'dosen' }
-        ];
-
-        for (const u of defaultUsers) {
-            const check = await db.execute({
-                sql: 'SELECT id FROM users WHERE username = ?',
-                args: [u.username]
-            });
-
-            if (check.rows.length === 0) {
-                const hash = bcrypt.hashSync(u.pass, 10);
-                await db.execute({
-                    sql: 'INSERT INTO users (username, password, nama, role) VALUES (?, ?, ?, ?)',
-                    args: [u.username, hash, u.nama, u.role]
-                });
-            }
-        }
-    } catch (err) {
-        console.error("Gagal Inisialisasi Turso DB:", err.message);
-    }
-}
-
-// Jalankan Inisialisasi DB
-initDb();
-
 function getDistance(lat1, lon1, lat2, lon2) {
     const R = 6371e3;
     const φ1 = lat1 * Math.PI / 180;
@@ -99,7 +41,62 @@ function getDistance(lat1, lon1, lat2, lon2) {
     return R * c;
 }
 
-// ROUTE API
+// ENDPOINT KHUSUS INIT DB (Akses manual di browser sekali saja: /api/init)
+app.get('/api/init', async (req, res) => {
+    try {
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE,
+                password TEXT,
+                nama TEXT,
+                role TEXT DEFAULT 'siswa'
+            )
+        `);
+
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS absensi (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                tanggal TEXT,
+                jam_masuk TEXT,
+                jam_pulang TEXT,
+                status_masuk TEXT,
+                status_pulang TEXT,
+                foto_masuk TEXT,
+                foto_pulang TEXT
+            )
+        `);
+
+        const defaultUsers = [
+            { username: 'hilmizaidan', pass: '23.83.0971', nama: 'Hilmi Zaidan', role: 'siswa' },
+            { username: 'andikahendra', pass: '23.83.0976', nama: 'Andika Hendra', role: 'siswa' },
+            { username: 'wahidashori', pass: 'wahid2026', nama: 'Wahid Ashori, M.Kom (Dosen)', role: 'dosen' }
+        ];
+
+        for (const u of defaultUsers) {
+            const check = await db.execute({
+                sql: 'SELECT id FROM users WHERE username = ?',
+                args: [u.username]
+            });
+
+            if (!check.rows || check.rows.length === 0) {
+                const hash = bcrypt.hashSync(u.pass, 10);
+                await db.execute({
+                    sql: 'INSERT INTO users (username, password, nama, role) VALUES (?, ?, ?, ?)',
+                    args: [u.username, hash, u.nama, u.role]
+                });
+            }
+        }
+
+        return res.json({ success: true, message: 'Database initialized successfully!' });
+    } catch (err) {
+        console.error("Init DB Error:", err);
+        return res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ROUTE API LOGIN
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
     try {
@@ -120,7 +117,7 @@ app.post('/api/login', async (req, res) => {
             return res.status(400).json({ success: false, message: 'Password salah' });
         }
     } catch (err) {
-        console.error("Login Error:", err.message);
+        console.error("Login Error:", err);
         return res.status(500).json({ success: false, message: 'Database error: ' + err.message });
     }
 });
@@ -170,7 +167,7 @@ app.post('/api/absen', async (req, res) => {
                 args: [req.session.user.id, dateStr]
             });
 
-            if (check.rows.length > 0) {
+            if (check.rows && check.rows.length > 0) {
                 return res.status(400).json({ message: 'Anda sudah absen masuk hari ini' });
             }
 
@@ -205,7 +202,7 @@ app.post('/api/absen', async (req, res) => {
             return res.json({ success: true, message: `Absen pulang berhasil (${status})` });
         }
     } catch (err) {
-        console.error("Absen Error:", err.message);
+        console.error("Absen Error:", err);
         return res.status(500).json({ message: 'Gagal mencatat absensi: ' + err.message });
     }
 });
@@ -232,7 +229,7 @@ app.get('/api/dosen/monitoring', async (req, res) => {
 
         return res.json({ stats, data: rows });
     } catch (err) {
-        console.error("Monitoring Error:", err.message);
+        console.error("Monitoring Error:", err);
         return res.status(500).json({ message: 'Database error: ' + err.message });
     }
 });
@@ -276,7 +273,7 @@ app.get('/api/export', async (req, res) => {
         await workbook.xlsx.write(res);
         return res.end();
     } catch (err) {
-        console.error("Export Error:", err.message);
+        console.error("Export Error:", err);
         return res.status(500).send('Database error: ' + err.message);
     }
 });
