@@ -230,5 +230,13 @@ app.get('/api/export', async (req, res) => {
 });
 
 app.listen(3000, () => console.log('Server running di http://localhost:3000'));
+// Export app agar bisa dibaca oleh Vercel
 module.exports = app;
-module.exports.handler = serverless(app);
+
+// Hanya jalankan app.listen() jika dijalankan secara lokal di laptop
+if (process.env.NODE_ENV !== 'production') {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
