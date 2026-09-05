@@ -3,47 +3,56 @@ const session = require('express-session');
 const bcrypt = require('bcrypt');
 const ExcelJS = require('exceljs');
 const path = require('path');
-const db = require('./db'); // Menggunakan koneksi Turso dari db.js
+const db = require('./db');
 
 const app = express();
 
 app.use(express.json({ limit: '10mb' }));
-app.use(express.static('public'));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.static(path.join(__dirname, 'public')));
+
 app.use(session({
-    secret: 'absensi-secret-key-magang',
+    secret: process.env.SESSION_SECRET || 'absensi-secret-key-magang',
     resave: false,
-    saveUninitialized: true
+    saveUninitialized: false,
+    cookie: {
+        secure: false, // Set true jika menggunakan HTTPS penuh
+        maxAge: 24 * 60 * 60 * 1000
+    }
 }));
 
 // CONFIG LOKASI
 const TARGET_LAT = -7.8016271;
 const TARGET_LNG = 110.3803174;
-const MAX_RADIUS = 10; // meter
+const MAX_RADIUS = 10;
 const DEV_MODE = true;
 
-// Inisialisasi Database Turso
+// Inisialisasi Tabel & Seed Data Satu per Satu (Menghindari Status 400 Turso)
 async function initDb() {
     try {
-        await db.execute(`CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE,
-            password TEXT,
-            nama TEXT,
-            role TEXT DEFAULT 'siswa'
-        )`);
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE,
+                password TEXT,
+                nama TEXT,
+                role TEXT DEFAULT 'siswa'
+            )
+        `);
 
-        await db.execute(`CREATE TABLE IF NOT EXISTS absensi (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            tanggal TEXT,
-            jam_masuk TEXT,
-            jam_pulang TEXT,
-            status_masuk TEXT,
-            status_pulang TEXT,
-            foto_masuk TEXT,
-            foto_pulang TEXT,
-            FOREIGN KEY(user_id) REFERENCES users(id)
-        )`);
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS absensi (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                tanggal TEXT,
+                jam_masuk TEXT,
+                jam_pulang TEXT,
+                status_masuk TEXT,
+                status_pulang TEXT,
+                foto_masuk TEXT,
+                foto_pulang TEXT
+            )
+        `);
 
         const defaultUsers = [
             { username: 'hilmizaidan', pass: '23.83.0971', nama: 'Hilmi Zaidan', role: 'siswa' },
@@ -52,19 +61,27 @@ async function initDb() {
         ];
 
         for (const u of defaultUsers) {
-            const hash = bcrypt.hashSync(u.pass, 10);
-            await db.execute({
-                sql: `INSERT OR IGNORE INTO users (username, password, nama, role) VALUES (?, ?, ?, ?)`,
-                args: [u.username, hash, u.nama, u.role]
+            const check = await db.execute({
+                sql: 'SELECT id FROM users WHERE username = ?',
+                args: [u.username]
             });
+
+            if (check.rows.length === 0) {
+                const hash = bcrypt.hashSync(u.pass, 10);
+                await db.execute({
+                    sql: 'INSERT INTO users (username, password, nama, role) VALUES (?, ?, ?, ?)',
+                    args: [u.username, hash, u.nama, u.role]
+                });
+            }
         }
     } catch (err) {
-        console.error("Gagal inisialisasi DB:", err);
+        console.error("Gagal Inisialisasi Turso DB:", err);
     }
 }
+
+// Jalankan Inisialisasi DB
 initDb();
 
-// Formula Haversine
 function getDistance(lat1, lon1, lat2, lon2) {
     const R = 6371e3;
     const φ1 = lat1 * Math.PI / 180;
@@ -79,40 +96,44 @@ function getDistance(lat1, lon1, lat2, lon2) {
     return R * c;
 }
 
-// Route Login
+// ROUTE API
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
     try {
         const result = await db.execute({
-            sql: `SELECT * FROM users WHERE username = ?`,
+            sql: 'SELECT * FROM users WHERE username = ?',
             args: [username]
         });
-        const user = result.rows[0];
 
-        if (!user) return res.status(400).json({ success: false, message: 'User tidak ditemukan' });
+        const user = result.rows[0];
+        if (!user) {
+            return res.status(400).json({ success: false, message: 'User tidak ditemukan' });
+        }
 
         if (bcrypt.compareSync(password, user.password)) {
             req.session.user = { id: user.id, username: user.username, nama: user.nama, role: user.role };
-            res.json({ success: true, user: req.session.user });
+            return res.json({ success: true, user: req.session.user });
         } else {
-            res.status(400).json({ success: false, message: 'Password salah' });
+            return res.status(400).json({ success: false, message: 'Password salah' });
         }
     } catch (err) {
-        res.status(500).json({ success: false, message: 'Database error' });
+        return res.status(500).json({ success: false, message: 'Database error' });
     }
 });
 
 app.get('/api/session', (req, res) => {
-    if (req.session && req.session.user) res.json({ loggedIn: true, user: req.session.user });
-    else res.json({ loggedIn: false });
+    if (req.session && req.session.user) {
+        return res.json({ loggedIn: true, user: req.session.user });
+    }
+    return res.json({ loggedIn: false });
 });
 
 app.get('/api/logout', (req, res) => {
-    req.session.destroy();
-    res.json({ success: true });
+    req.session.destroy(() => {
+        res.json({ success: true });
+    });
 });
 
-// Route Absensi
 app.post('/api/absen', async (req, res) => {
     if (!req.session.user || req.session.user.role !== 'siswa') {
         return res.status(401).json({ message: 'Akses ditolak' });
@@ -138,30 +159,30 @@ app.post('/api/absen', async (req, res) => {
 
     try {
         if (type === 'masuk') {
-            let status = 'Tepat Waktu';
-            if (timeStr > '07:00:59') status = 'Terlambat';
+            let status = timeStr > '07:00:59' ? 'Terlambat' : 'Tepat Waktu';
 
             const check = await db.execute({
-                sql: `SELECT * FROM absensi WHERE user_id = ? AND tanggal = ?`,
+                sql: 'SELECT id FROM absensi WHERE user_id = ? AND tanggal = ?',
                 args: [req.session.user.id, dateStr]
             });
 
-            if (check.rows.length > 0) return res.status(400).json({ message: 'Anda sudah absen masuk hari ini' });
+            if (check.rows.length > 0) {
+                return res.status(400).json({ message: 'Anda sudah absen masuk hari ini' });
+            }
 
             await db.execute({
-                sql: `INSERT INTO absensi (user_id, tanggal, jam_masuk, status_masuk, foto_masuk) VALUES (?, ?, ?, ?, ?)`,
+                sql: 'INSERT INTO absensi (user_id, tanggal, jam_masuk, status_masuk, foto_masuk) VALUES (?, ?, ?, ?, ?)',
                 args: [req.session.user.id, dateStr, timeStr, status, image]
             });
 
-            res.json({ success: true, message: `Absen masuk berhasil (${status})` });
+            return res.json({ success: true, message: `Absen masuk berhasil (${status})` });
 
         } else if (type === 'pulang') {
             let jamPulangAcuan = (day === 5) ? '14:00:00' : '15:30:00';
-            let status = 'Sesuai Jadwal';
-            if (timeStr < jamPulangAcuan) status = 'Pulang Awal';
+            let status = timeStr < jamPulangAcuan ? 'Pulang Awal' : 'Sesuai Jadwal';
 
             const check = await db.execute({
-                sql: `SELECT * FROM absensi WHERE user_id = ? AND tanggal = ?`,
+                sql: 'SELECT * FROM absensi WHERE user_id = ? AND tanggal = ?',
                 args: [req.session.user.id, dateStr]
             });
 
@@ -170,18 +191,17 @@ app.post('/api/absen', async (req, res) => {
             if (row.jam_pulang) return res.status(400).json({ message: 'Anda sudah absen pulang hari ini' });
 
             await db.execute({
-                sql: `UPDATE absensi SET jam_pulang = ?, status_pulang = ?, foto_pulang = ? WHERE id = ?`,
+                sql: 'UPDATE absensi SET jam_pulang = ?, status_pulang = ?, foto_pulang = ? WHERE id = ?',
                 args: [timeStr, status, image, row.id]
             });
 
-            res.json({ success: true, message: `Absen pulang berhasil (${status})` });
+            return res.json({ success: true, message: `Absen pulang berhasil (${status})` });
         }
     } catch (err) {
-        res.status(500).json({ message: 'Gagal mencatat absensi' });
+        return res.status(500).json({ message: 'Gagal mencatat absensi' });
     }
 });
 
-// API DOSEN
 app.get('/api/dosen/monitoring', async (req, res) => {
     if (!req.session.user || req.session.user.role !== 'dosen') {
         return res.status(403).json({ message: 'Akses khusus Dosen' });
@@ -202,13 +222,12 @@ app.get('/api/dosen/monitoring', async (req, res) => {
             pulangAwal: rows.filter(r => r.status_pulang === 'Pulang Awal').length
         };
 
-        res.json({ stats, data: rows });
+        return res.json({ stats, data: rows });
     } catch (err) {
-        res.status(500).json({ message: 'Database error' });
+        return res.status(500).json({ message: 'Database error' });
     }
 });
 
-// Export Laporan Excel
 app.get('/api/export', async (req, res) => {
     if (!req.session.user) return res.status(401).send('Unauthorized');
     const { range } = req.query; 
@@ -216,15 +235,15 @@ app.get('/api/export', async (req, res) => {
     let daysBack = range === 'weekly' ? 7 : 30;
     const dateLimit = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
-    let query = `SELECT a.*, u.nama, u.username FROM absensi a JOIN users u ON a.user_id = u.id WHERE a.tanggal >= ?`;
+    let query = 'SELECT a.*, u.nama, u.username FROM absensi a JOIN users u ON a.user_id = u.id WHERE a.tanggal >= ?';
     let params = [dateLimit];
 
     if (req.session.user.role === 'siswa') {
-        query += ` AND a.user_id = ?`;
+        query += ' AND a.user_id = ?';
         params.push(req.session.user.id);
     }
 
-    query += ` ORDER BY a.tanggal DESC`;
+    query += ' ORDER BY a.tanggal DESC';
 
     try {
         const result = await db.execute({ sql: query, args: params });
@@ -246,17 +265,15 @@ app.get('/api/export', async (req, res) => {
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         res.setHeader('Content-Disposition', `attachment; filename=Laporan_Absensi_${range}.xlsx`);
         await workbook.xlsx.write(res);
-        res.end();
+        return res.end();
     } catch (err) {
-        res.status(500).send('Error database');
+        return res.status(500).send('Error database');
     }
 });
 
 module.exports = app;
 
 if (process.env.NODE_ENV !== 'production') {
-  const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-  });
+    const PORT = process.env.PORT || 3000;
+    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 }
