@@ -1,6 +1,6 @@
 const express = require('express');
 const session = require('express-session');
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs'); // PENTING: Gunakan bcryptjs untuk menghindari native binding crash
 const ExcelJS = require('exceljs');
 const path = require('path');
 const db = require('./db');
